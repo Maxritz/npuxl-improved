@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "recommendations": [
+    {
+      "shape": "64x64x64",
+      "unit": "VOODOO",
+      "tile_m": 32,
+      "tile_k": 64,
+      "tile_n": 64,
+      "threads": 2,
+      "best_ms": 0.024878,
+      "baseline_ms": 0.141214,
+      "speedup": 5.67626,
+      "gflops": 21.0744,
+      "dtype": "f32"
+    },
+    {
+      "shape": "64x64x64",
+      "unit": "VOODOO",
+      "tile_m": 64,
+      "tile_k": 64,
+      "tile_n": 64,
+      "threads": 2,
+      "best_ms": 0.0632793,
+      "baseline_ms": 0.17961,
+      "speedup": 2.83837,
+      "gflops": 8.2853,
+      "dtype": "i8"
+    }
+  ],
+  "global": {
+    "f32": {
+      "shape": "64x64x64",
+      "unit": "VOODOO",
+      "tile_m": 32,
+      "tile_k": 64,
+      "tile_n": 64,
+      "threads": 2,
+      "best_ms": 0.024878,
+      "baseline_ms": 0.141214,
+      "speedup": 5.67626,
+      "gflops": 21.0744,
+      "dtype": "f32"
+    },
+    "i8": {
+      "shape": "64x64x64",
+      "unit": "VOODOO",
+      "tile_m": 64,
+      "tile_k": 64,
+      "tile_n": 64,
+      "threads": 2,
+      "best_ms": 0.0632793,
+      "baseline_ms": 0.17961,
+      "speedup": 2.83837,
+      "gflops": 8.2853,
+      "dtype": "i8"
+    }
+  }
+}

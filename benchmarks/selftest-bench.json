@@ -1,0 +1,24 @@
+{
+  "version": "vnpu 1.0.0",
+  "backend": "AVX512F+VNNI",
+  "simd_bits": 512,
+  "threads": 2,
+  "results": [
+    {"shape":"64x64x64","dtype":"f32","unit":"auto","threads":2,"iterations":1,"ms":0.135047,"gflops":3.882263,"baseline_ms":0.116541,"speedup":0.862966,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":12,"tiles_culled":0,"correct":true},
+    {"shape":"64x64x64","dtype":"f32","unit":"voodoo","threads":2,"iterations":1,"ms":0.085178,"gflops":6.155204,"baseline_ms":0.116541,"speedup":1.368205,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":15,"tiles_culled":0,"correct":true},
+    {"shape":"64x64x64","dtype":"f32","unit":"wildcat","threads":2,"iterations":1,"ms":0.091152,"gflops":5.751799,"baseline_ms":0.116541,"speedup":1.278535,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":21,"tiles_culled":0,"correct":true},
+    {"shape":"64x64x64","dtype":"f32","unit":"cell","threads":2,"iterations":1,"ms":0.190809,"gflops":2.747711,"baseline_ms":0.116541,"speedup":0.610773,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":33,"tiles_culled":0,"correct":true},
+    {"shape":"64x64x64","dtype":"i8","unit":"auto","threads":2,"iterations":1,"ms":0.167156,"gflops":3.136519,"baseline_ms":0.116541,"speedup":0.697199,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":45,"tiles_culled":0,"correct":true},
+    {"shape":"64x64x64","dtype":"i8","unit":"voodoo","threads":2,"iterations":1,"ms":0.081921,"gflops":6.399922,"baseline_ms":0.116541,"speedup":1.422602,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":48,"tiles_culled":0,"correct":true},
+    {"shape":"64x64x64","dtype":"i8","unit":"wildcat","threads":2,"iterations":1,"ms":0.093475,"gflops":5.608858,"baseline_ms":0.116541,"speedup":1.246761,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":54,"tiles_culled":0,"correct":true},
+    {"shape":"64x64x64","dtype":"i8","unit":"cell","threads":2,"iterations":1,"ms":0.184493,"gflops":2.841777,"baseline_ms":0.116541,"speedup":0.631682,"bytes_read":32768,"bytes_written":16384,"flops":524288,"tiles_dispatched":66,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"f32","unit":"auto","threads":2,"iterations":1,"ms":0.466337,"gflops":8.994148,"baseline_ms":1.802201,"speedup":3.864589,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":114,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"f32","unit":"voodoo","threads":2,"iterations":1,"ms":0.150492,"gflops":27.870611,"baseline_ms":1.802201,"speedup":11.975394,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":126,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"f32","unit":"wildcat","threads":2,"iterations":1,"ms":0.120433,"gflops":34.826866,"baseline_ms":1.802201,"speedup":14.964345,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":150,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"f32","unit":"cell","threads":2,"iterations":1,"ms":0.457979,"gflops":9.158289,"baseline_ms":1.802201,"speedup":3.935117,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":198,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"i8","unit":"auto","threads":2,"iterations":1,"ms":0.648883,"gflops":6.463883,"baseline_ms":1.802201,"speedup":2.777390,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":246,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"i8","unit":"voodoo","threads":2,"iterations":1,"ms":0.061880,"gflops":67.781254,"baseline_ms":1.802201,"speedup":29.124127,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":258,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"i8","unit":"wildcat","threads":2,"iterations":1,"ms":0.129274,"gflops":32.445070,"baseline_ms":1.802201,"speedup":13.940939,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":282,"tiles_culled":0,"correct":true},
+    {"shape":"128x128x128","dtype":"i8","unit":"cell","threads":2,"iterations":1,"ms":0.668348,"gflops":6.275629,"baseline_ms":1.802201,"speedup":2.696501,"bytes_read":131072,"bytes_written":65536,"flops":4194304,"tiles_dispatched":330,"tiles_culled":0,"correct":true}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "hidden": 512,
+  "intermediate": 1376,
+  "heads": 8,
+  "layers": 2,
+  "results": [
+    {"phase":"prefill","dtype":"f32","tokens":32,"ms":16.331826,"tokens_per_second":1959.364495,"gflops":25.039738,"flops":408944640},
+    {"phase":"decode","dtype":"f32","tokens":1,"ms":11.314103,"tokens_per_second":88.385268,"gflops":1.118298,"flops":12652544},
+    {"phase":"prefill","dtype":"i8","tokens":32,"ms":11.675518,"tokens_per_second":2740.777754,"gflops":35.025824,"flops":408944640},
+    {"phase":"decode","dtype":"i8","tokens":1,"ms":10.415848,"tokens_per_second":96.007542,"gflops":1.214740,"flops":12652544}
+  ]
+}

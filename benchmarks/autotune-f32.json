@@ -1,0 +1,1 @@
+{"shape":"512x512x512","unit":"VOODOO","tile_m":32,"tile_k":128,"tile_n":64,"threads":2,"best_ms":4.38023,"baseline_ms":167.716,"speedup":38.2894,"gflops":61.2834}
