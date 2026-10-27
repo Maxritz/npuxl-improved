@@ -1,0 +1,5 @@
+version=1.0.0
+built=2026-10-27T02:17:25Z
+compiler=g++ (Debian 14.2.0-19) 14.2.0
+uname=Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Wed Sep 30 12:40:02 UTC 2026 x86_64 GNU/Linux
+flags=-std=c++17 -O3 -fPIC -pthread -fvisibility=hidden -fno-math-errno -ffp-contract=fast -funroll-loops -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -DNDEBUG

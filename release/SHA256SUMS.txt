@@ -1,0 +1,1 @@
+4ee4f4ac8f37e534ed7e8b6248e70fe5683a54c87d8cb177b8550d19d61fc083  release/vnpu-standalone-1.0.0.tar.gz
