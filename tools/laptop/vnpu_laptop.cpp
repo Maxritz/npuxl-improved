@@ -927,9 +927,14 @@ static void gemm_i8_vnni_rowblk(const int8_t* A, int M, int K, const PackedI8& B
         const int mr = (m0 + MR <= M) ? MR : (M - m0);
         std::vector<__m256i> avec((size_t)mr * kg);
         {   SHERLOCK_SCOPE(SHERLOCK_TRAP_INSTRUCTION, "rowblk.avec", 0, 0);
+            /* The packed 3DNow!/AltiVec broadcast builder, one row at a time.
+             * Using the scalar make_avec() here - as this kernel first did -
+             * costs ~10 ops per group against ~1.25, and it is rebuilt for
+             * every M-block, so it dominated the whole kernel and hid the
+             * benefit of reusing each B operand across MR rows. */
             for (int i = 0; i < mr; i++) {
                 const int8_t* ar = A + (size_t)(m0 + i) * K;
-                for (int g = 0; g < kg; g++) avec[(size_t)i * kg + g] = make_avec(ar, K, g);
+                make_avec_row(ar, K, kg, avec.data() + (size_t)i * kg);
             } }
 
         for (int p = 0; p < NP; p++) {
@@ -1097,6 +1102,54 @@ static double timeit(int reps, F fn) {
     return (now_s() - t0) / reps;
 }
 
+/* ------------------------------------------------------------------------
+ * What is the actual VNNI issue ceiling on this core?
+ *
+ * The headline "compute peak" is ghz * 32 MAC, i.e. one VPDPBUSD per cycle.
+ * Whether that is reachable decides whether further kernel work is worth
+ * anything, so measure it directly: independent accumulator chains, operands
+ * already in registers, nothing else in the loop.
+ * ------------------------------------------------------------------------ */
+static volatile int g_sink;
+
+NOINLINE
+static double vnni_peak_reg(long iters, int nchains) {
+    const __m256i a = _mm256_set1_epi8(3);
+    const __m256i b = _mm256_set1_epi8(5);
+    __m256i acc[16];
+    for (int i = 0; i < nchains; i++) acc[i] = _mm256_set1_epi32(i);
+    const double t0 = now_s();
+    for (long it = 0; it < iters; it++)
+        for (int i = 0; i < nchains; i++)
+            acc[i] = _mm256_dpbusd_avx_epi32(acc[i], a, b);
+    const double dt = now_s() - t0;
+    int s = 0;
+    for (int i = 0; i < nchains; i++) s += _mm_extract_epi32(_mm256_castsi256_si128(acc[i]), 0);
+    g_sink = s;
+    return dt;
+}
+
+NOINLINE
+static double vnni_peak_l1(long iters, int nchains, const uint8_t* buf, size_t mask) {
+    const __m256i a = _mm256_set1_epi8(3);
+    __m256i acc[16];
+    for (int i = 0; i < nchains; i++) acc[i] = _mm256_set1_epi32(i);
+    size_t off = 0;
+    const double t0 = now_s();
+    for (long it = 0; it < iters; it++) {
+        const uint8_t* q = buf + (off & mask);
+        for (int i = 0; i < nchains; i++)
+            acc[i] = _mm256_dpbusd_avx_epi32(acc[i], a,
+                     _mm256_loadu_si256((const __m256i*)(q + (size_t)i * 32)));
+        off += (size_t)nchains * 32;
+    }
+    const double dt = now_s() - t0;
+    int s = 0;
+    for (int i = 0; i < nchains; i++) s += _mm_extract_epi32(_mm256_castsi256_si128(acc[i]), 0);
+    g_sink = s;
+    return dt;
+}
+
 int main() {
     setvbuf(stdout, NULL, _IONBF, 0);
     const double wall0 = now_s();
@@ -1147,6 +1200,34 @@ int main() {
         printf("  rowblk MR=4 : %.6g\n", md(gemm_i8_vnni_rowblk<4>));
     }
     printf("\n");
+
+    /* ---- VNNI issue ceiling: is 32 MAC/cycle actually reachable? ---------- */
+    {
+        const long IT = 2000000;
+        const int chain[4] = { 1, 2, 4, 8 };
+        printf("VNNI issue ceiling (register-only and L1-fed, independent chains)\n");
+        printf("theoretical peak = ghz * 32 = %.1f GMAC/s\n", ghz * 32.0);
+        printf("%-10s %-8s %12s %12s %10s\n", "source", "chains", "GMAC/s", "MAC/cycle", "vs peak");
+        printf("--------------------------------------------------------------\n");
+        for (int c = 0; c < 4; c++) {
+            const int nc = chain[c];
+            const double t = vnni_peak_reg(IT, nc);
+            const double mac = (double)IT * nc * 32;
+            const double g = mac / t / 1e9;
+            printf("%-10s %-8d %12.1f %12.2f %9.0f%%\n", "registers", nc, g, g / ghz, 100.0 * g / (ghz * 32.0));
+        }
+        /* L1-resident operand: 4 KB walks in a loop, so it stays in L1 */
+        std::vector<uint8_t> l1(4096);
+        for (size_t i = 0; i < l1.size(); i++) l1[i] = (uint8_t)(i * 7 + 1);
+        for (int c = 0; c < 4; c++) {
+            const int nc = chain[c];
+            const double t = vnni_peak_l1(IT / 2, nc, l1.data(), l1.size() - (size_t)nc * 32);
+            const double mac = (double)(IT / 2) * nc * 32;
+            const double g = mac / t / 1e9;
+            printf("%-10s %-8d %12.1f %12.2f %9.0f%%\n", "L1", nc, g, g / ghz, 100.0 * g / (ghz * 32.0));
+        }
+        printf("\n");
+    }
 
     /* ---- throughput ---- */
     const double macs = (double)N * K;
