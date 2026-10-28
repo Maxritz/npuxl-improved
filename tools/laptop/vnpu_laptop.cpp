@@ -451,6 +451,159 @@ static void pan8_range(const int8_t* A, int M, int K, const PackedI8& B, float* 
     pan8_range_m<STORE, PF>(A, 0, M, K, B, C, p0, p1);
 }
 
+/* --------------------------------------- Cell-style staging tile (SPE model) */
+/*
+ * Cell's SPE model is a small software-managed local store plus a double-buffered
+ * DMA. The x86 analogue used here is a 64-byte-aligned buffer sized to fit L1
+ * (48 KB on this P-core) and a sequential copy of one K-tile issued one tile
+ * ahead, so filling tile t+1 overlaps the arithmetic on tile t.
+ *
+ * A "tile" is a run of K-groups belonging to one 64-column panel. The point of
+ * the staging buffer is that the compute loop then reads with unit stride out of
+ * a known-resident buffer instead of walking the whole panel, which is what Cell
+ * bought by making the local store explicit.
+ *
+ * Two modes, because they cost different things:
+ *
+ *   STAGE_COPY     - explicit memcpy into the staging buffer: the literal DMA.
+ *                    Pays an extra read+write of every weight byte.
+ *   STAGE_PREFETCH - no copy, only T0/NTA touches issued one whole tile ahead.
+ *                    Same lookahead, no extra bandwidth. The plain pan8 kernel
+ *                    only looks one cache line ahead, so the depth is the change.
+ *
+ * The staging buffer is a persistent thread-local "local store", allocated once
+ * and grown as needed, so per-call timing does not include malloc.
+ */
+static constexpr int PAN8_PB = 8;   /* 8 blocks of 8 output columns per panel */
+
+/* Accumulate K-groups [g0,g1) of one panel. Group g0 sits at offset 0 of base,
+ * so base is either the panel itself or a staged copy of one tile of it. */
+static inline void pan8_acc_tile(__m256i* acc, const uint8_t* base,
+                                 const __m256i* avec, int g0, int g1) {
+    constexpr int PB = PAN8_PB;
+    int t = 0, g = g0;
+    for (; g + 2 <= g1; g += 2, t += 2) {
+        const __m256i a0 = avec[g], a1 = avec[g + 1];
+        const uint8_t* q0 = base + (size_t)t * PB * 32;
+        const uint8_t* q1 = q0 + PB * 32;
+        for (int b = 0; b < PB; b++) {
+            acc[b] = _mm256_dpbusd_avx_epi32(acc[b], a0,
+                     _mm256_loadu_si256((const __m256i*)(q0 + (size_t)b * 32)));
+            acc[b] = _mm256_dpbusd_avx_epi32(acc[b], a1,
+                     _mm256_loadu_si256((const __m256i*)(q1 + (size_t)b * 32)));
+        }
+    }
+    for (; g < g1; g++, t++) {
+        const __m256i a0 = avec[g];
+        const uint8_t* q0 = base + (size_t)t * PB * 32;
+        for (int b = 0; b < PB; b++)
+            acc[b] = _mm256_dpbusd_avx_epi32(acc[b], a0,
+                     _mm256_loadu_si256((const __m256i*)(q0 + (size_t)b * 32)));
+    }
+}
+
+/* Touch a whole tile into cache, one line at a time. */
+template <int PF>
+static inline void pan8_pf_bytes(const uint8_t* base, int bytes) {
+    if constexpr (PF != PF_NONE)
+        for (int o = 0; o < bytes; o += 64) dst_touch<PF>(base + o);
+}
+
+/* The literal DMA: move one tile into the local store. */
+static inline void pan8_stage(uint8_t* dst, const uint8_t* panel, int g0, int tile_g) {
+    memcpy(dst, panel + (size_t)g0 * PAN8_PB * 32, (size_t)tile_g * PAN8_PB * 32);
+}
+
+/* Cached epilogue for panel p: undo the +128 bias, apply the row scale. */
+static inline void pan8_epilogue(const PackedI8& B, const __m256i* acc, float* cr, int p) {
+    constexpr int PB = PAN8_PB, NB = 8, PCOLS = PB * NB;
+    for (int b = 0; b < PB; b++) {
+        const int n0 = p * PCOLS + b * NB;
+        const __m256i sums = _mm256_loadu_si256((const __m256i*)(B.colsums.data() + n0));
+        const __m256i fx   = _mm256_sub_epi32(acc[b], _mm256_slli_epi32(sums, 7));
+        const __m256 v = _mm256_mul_ps(_mm256_cvtepi32_ps(fx),
+                                       _mm256_loadu_ps(B.scales.data() + n0));
+        _mm256_storeu_ps(cr + n0, v);
+    }
+}
+
+enum { STAGE_COPY = 0, STAGE_PREFETCH = 1 };
+
+template <int MODE, int PF>
+NOINLINE
+static void gemm_i8_vnni_stage(const int8_t* A, int M, int K, const PackedI8& B,
+                               float* C, int tile_g) {
+    constexpr int PB = PAN8_PB, PCOLS = PAN8_PB * 8;
+    const int kg = B.Kpad / 4;
+    const int NP = B.N / PCOLS;
+    const size_t pan_bytes  = (size_t)kg * PB * 32;
+    const size_t tile_bytes = (size_t)tile_g * PB * 32;
+    const int ntiles = (kg + tile_g - 1) / tile_g;
+
+    /* persistent thread-local local store */
+    static thread_local uint8_t* stage = nullptr;
+    static thread_local size_t stage_cap = 0;
+    if (stage_cap < tile_bytes * 2) {
+        if (stage) _aligned_free(stage);
+        stage = (uint8_t*)_aligned_malloc(tile_bytes * 2, 64);
+        stage_cap = tile_bytes * 2;
+    }
+
+    std::vector<__m256i> avec(kg);
+
+    for (int m = 0; m < M; m++) {
+        const int8_t* ar = A + (size_t)m * K;
+        {   SHERLOCK_SCOPE(SHERLOCK_TRAP_INSTRUCTION, "stage.avec.build", 0, 0);
+            make_avec_row(ar, K, kg, avec.data()); }
+        float* cr = C + (size_t)m * B.N;
+
+        for (int p = 0; p < NP; p++) {
+            const uint8_t* pb0 = B.pan8.data() + (size_t)p * pan_bytes;
+            __m256i acc[PB];
+            for (int b = 0; b < PB; b++) acc[b] = _mm256_setzero_si256();
+
+            if constexpr (MODE == STAGE_COPY) {
+                /* prologue fills buffer 0, then keep exactly one tile in flight */
+                int g0 = 0;
+                int g1 = (g0 + tile_g < kg) ? g0 + tile_g : kg;
+                {   SHERLOCK_SCOPE(SHERLOCK_TRAP_TRANSFER, "stage.dma", 0, tile_bytes);
+                    pan8_stage(stage, pb0, g0, g1 - g0); }
+                for (int t = 0; t < ntiles; t++) {
+                    const int n0 = g1;
+                    const int n1 = (n0 + tile_g < kg) ? n0 + tile_g : kg;
+                    if (t + 1 < ntiles) {
+                        SHERLOCK_SCOPE(SHERLOCK_TRAP_TRANSFER, "stage.dma", 0, tile_bytes);
+                        pan8_stage(stage + (size_t)((t + 1) & 1) * tile_bytes, pb0, n0, n1 - n0);
+                    }
+                    {   SHERLOCK_SCOPE(SHERLOCK_TRAP_COMPUTE, "stage.kloop",
+                                       (uint64_t)PCOLS * K, tile_bytes);
+                        pan8_acc_tile(acc, stage + (size_t)(t & 1) * tile_bytes,
+                                      avec.data(), g0, g1); }
+                    g0 = n0; g1 = n1;
+                }
+            } else {
+                int g0 = 0;
+                for (int t = 0; t < ntiles; t++, g0 += tile_g) {
+                    const int g1 = (g0 + tile_g < kg) ? g0 + tile_g : kg;
+                    const int n1 = (g1 + tile_g < kg) ? g1 + tile_g : kg;
+                    if (t + 1 < ntiles) pan8_pf_bytes<PF>(pb0 + (size_t)g1 * PB * 32, (n1 - g1) * PB * 32);
+                    {   SHERLOCK_SCOPE(SHERLOCK_TRAP_COMPUTE, "stage.kloop",
+                                       (uint64_t)PCOLS * K, (uint64_t)(g1 - g0) * PB * 32);
+                        pan8_acc_tile(acc, pb0 + (size_t)g0 * PB * 32, avec.data(), g0, g1); }
+                }
+            }
+            {   SHERLOCK_SCOPE(SHERLOCK_TRAP_MEMORY, "stage.epilogue", 0, (uint64_t)PCOLS * 4);
+                pan8_epilogue(B, acc, cr, p); }
+        }
+    }
+}
+
+static void k_stage_pf64  (const int8_t* A, int M, int K, const PackedI8& B, float* C) { gemm_i8_vnni_stage<STAGE_PREFETCH, PF_T0 >(A, M, K, B, C,  64); }
+static void k_stage_pf128 (const int8_t* A, int M, int K, const PackedI8& B, float* C) { gemm_i8_vnni_stage<STAGE_PREFETCH, PF_T0 >(A, M, K, B, C, 128); }
+static void k_stage_pfnta64(const int8_t* A, int M, int K, const PackedI8& B, float* C) { gemm_i8_vnni_stage<STAGE_PREFETCH, PF_NTA>(A, M, K, B, C,  64); }
+static void k_stage_cp64  (const int8_t* A, int M, int K, const PackedI8& B, float* C) { gemm_i8_vnni_stage<STAGE_COPY,     PF_NONE>(A, M, K, B, C, 64); }
+static void k_stage_cp32  (const int8_t* A, int M, int K, const PackedI8& B, float* C) { gemm_i8_vnni_stage<STAGE_COPY,     PF_NONE>(A, M, K, B, C, 32); }
+
 /*
  * NPU cluster: one worker per P-core, plus an E-core governor.
  *
@@ -1091,6 +1244,106 @@ int main() {
             sherlock_mute(false);
             _aligned_free(C);
             printf("\n");
+        }
+    }
+
+    /* ---- Cell-style staging tile: double-buffered local store ------------- */
+    {
+        printf("staging tile (Cell SPE model): L1-resident buffer, one tile in flight\n");
+        typedef void (*kfn)(const int8_t*, int, int, const PackedI8&, float*);
+        struct SV { const char* nm; kfn fn; };
+
+        /* correctness at tile sizes that do not divide the K-group count */
+        {
+            const int Mc3 = 3;
+            float* Cc = (float*)_aligned_malloc((size_t)Mc3 * N * 4, 32);
+            sherlock_mute(true);
+            auto maxdiff = [&](int tile_g) {
+                gemm_i8_vnni_stage<STAGE_PREFETCH, PF_T0>(a.data(), Mc3, K, B, Cc, tile_g);
+                double m = 0;
+                for (int i = 0; i < Mc3 * N; i++) m = (std::max)(m, fabs((double)Cc[i] - (double)c_ref[i]));
+                return m;
+            };
+            const double d97 = maxdiff(97);
+            gemm_i8_vnni_stage<STAGE_COPY, PF_NONE>(a.data(), Mc3, K, B, Cc, 61);
+            double dcp = 0;
+            for (int i = 0; i < Mc3 * N; i++) dcp = (std::max)(dcp, fabs((double)Cc[i] - (double)c_ref[i]));
+            sherlock_mute(false);
+            _aligned_free(Cc);
+            printf("  correctness vs oracle: prefetch tile97 diff=%.6g  copy tile61 diff=%.6g\n\n", d97, dcp);
+        }
+
+        SV sv[] = {
+            { "stage pf tile64",   k_stage_pf64   },
+            { "stage pf tile128",  k_stage_pf128  },
+            { "stage pfNTA tile64",k_stage_pfnta64},
+            { "stage copy tile64", k_stage_cp64   },
+            { "stage copy tile32", k_stage_cp32   },
+        };
+        const int NSV = (int)(sizeof(sv) / sizeof(sv[0]));
+
+        /* (a) the geometry used everywhere else: B fits well inside L3 */
+        {
+            printf("  B = %d x %d (%.1f MB), fits L3\n", N, K, (double)N * K / 1e6);
+            printf("  %-6s %-20s %10s %12s %10s %9s\n", "M", "variant", "ms", "GMAC/s", "GB/s", "vs pan8");
+            printf("  -----------------------------------------------------------------\n");
+            const int Ms6[] = { 1, 128 };
+            for (int si = 0; si < 2; si++) {
+                const int M = Ms6[si];
+                float* C = (float*)_aligned_malloc((size_t)M * N * 4, 32);
+                const double macc = (double)M * N * K;
+                const int reps = (M <= 1) ? 20 : 4;
+                sherlock_mute(true);
+                const double base = timeit(reps, [&]{ gemm_i8_vnni_pan8(a.data(), M, K, B, C); });
+                sherlock_mute(false);
+                printf("  %-6d %-20s %10.3f %12.1f %10.1f %8.2fx\n", M, "pan8 (baseline)",
+                       base * 1e3, macc / base / 1e9, (double)N * K / base / 1e9, 1.0);
+                for (int v = 0; v < NSV; v++) {
+                    sherlock_mute(true);
+                    const double t = timeit(reps, [&]{ sv[v].fn(a.data(), M, K, B, C); });
+                    sherlock_mute(false);
+                    printf("  %-6d %-20s %10.3f %12.1f %10.1f %8.2fx\n", M, sv[v].nm,
+                           t * 1e3, macc / t / 1e9, (double)N * K / t / 1e9, base / t);
+                }
+                printf("\n");
+                _aligned_free(C);
+            }
+        }
+
+        /* (b) the regime the technique is actually for: B far larger than L3, so
+         *     a decode pass cannot lean on cache and the read stream is the limit */
+        {
+            const int N2 = 8192, K2 = 4096;      /* 32 MB of int8 weights */
+            printf("  B = %d x %d (%.1f MB), exceeds L3 (%s)\n",
+                   N2, K2, (double)N2 * K2 / 1e6, "18 MB");
+            std::vector<int8_t> w2((size_t)N2 * K2), a2((size_t)K2 * 256);
+            for (size_t i = 0; i < w2.size(); i++) w2[i] = (int8_t)((i * 131 + 7) % 255 - 127);
+            for (size_t i = 0; i < a2.size(); i++) a2[i] = (int8_t)((i * 97 + 13) % 255 - 127);
+            PackedI8 B2; pack_i8(B2, w2, N2, K2);
+
+            printf("  %-6s %-20s %10s %12s %10s %9s\n", "M", "variant", "ms", "GMAC/s", "GB/s", "vs pan8");
+            printf("  -----------------------------------------------------------------\n");
+            const int Ms7[] = { 1, 32 };
+            for (int si = 0; si < 2; si++) {
+                const int M = Ms7[si];
+                float* C = (float*)_aligned_malloc((size_t)M * N2 * 4, 32);
+                const double macc = (double)M * N2 * K2;
+                const int reps = (M <= 1) ? 20 : 4;
+                sherlock_mute(true);
+                const double base = timeit(reps, [&]{ gemm_i8_vnni_pan8(a2.data(), M, K2, B2, C); });
+                sherlock_mute(false);
+                printf("  %-6d %-20s %10.3f %12.1f %10.1f %8.2fx\n", M, "pan8 (baseline)",
+                       base * 1e3, macc / base / 1e9, (double)N2 * K2 / base / 1e9, 1.0);
+                for (int v = 0; v < NSV; v++) {
+                    sherlock_mute(true);
+                    const double t = timeit(reps, [&]{ sv[v].fn(a2.data(), M, K2, B2, C); });
+                    sherlock_mute(false);
+                    printf("  %-6d %-20s %10.3f %12.1f %10.1f %8.2fx\n", M, sv[v].nm,
+                           t * 1e3, macc / t / 1e9, (double)N2 * K2 / t / 1e9, base / t);
+                }
+                printf("\n");
+                _aligned_free(C);
+            }
         }
     }
 
