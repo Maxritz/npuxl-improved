@@ -560,71 +560,74 @@ static inline int32_t hsum256_epi32(__m256i v)
     return sum;
 }
 
-VNPU_TARGET_AVX2
 /* Without VNNI there is no int8 dot-product instruction, so the only exact
  * and vectorisable axis on row-major B is the column axis: broadcast one A
  * value and multiply eight contiguous B bytes.  The previous version built B's
  * operand byte-by-byte out of a strided column, which is why it measured 0.08x
  * a plain compiler loop.  Two rows share each B load; eight int32 accumulators
  * plus the operand vectors still fit the 16 YMM registers. */
-/* Two-row rank-2 stream.
+/* Rank-R staged row stream (R = 2 or 3; R=4 is implemented and measured
+ * worse, see the dispatch).
  *
- * The 32-column register block below cannot hold two accumulator rows at a wide
- * width without spilling, so it walks B as 64-byte runs at stride N -- the same
- * prefetch-hostile read that made the single row 3.1x slower than its streaming
- * form.  Staging both int32 rows in L1 and sweeping B once keeps every B line
- * useful to both rows and restores a long sequential run.  Returns false when
- * the per-thread scratch cannot hold the two rows, so the caller keeps the
- * blocked walk. */
+ * The 32-column register block below cannot hold several accumulator rows at a
+ * wide width without spilling, so it walks B as 64-byte runs at stride N -- the
+ * same prefetch-hostile read that made the single row 3.1x slower than its
+ * streaming form.  The packed panel fixes the locality but couples rows in
+ * pairs, so an odd row re-reads the whole panel: at M=3 that is 128 bytes of
+ * panel read per k step for three outputs against the same 128 for four at M=4,
+ * which is the entire 0.65 vs 0.51 ms/row gap.  Staging the R rows in L1 and
+ * sweeping B once makes every B byte worth R FMAs.  Returns false when the
+ * per-thread scratch cannot hold the rows, so the caller keeps the old path. */
+template <uint32_t R>
 VNPU_TARGET_AVX2
-static bool gemm_i8_avx2_rank2(const GemmI8Params &p, const TileJob &tile)
+static bool gemm_i8_avx2_rank_r(const GemmI8Params &p, const TileJob &tile)
 {
+    static_assert(R >= 2 && R <= 4, "rank stream covers 2 to 4 rows");
     const uint32_t width = tile.tn;
     const uint32_t stride = (width + 7u) & ~7u;
     uint64_t scratch_bytes = 0;
     uint8_t *scratch = thread_scratch(scratch_bytes);
-    const uint64_t need = static_cast<uint64_t>(stride) * 2u * sizeof(int32_t) +
+    const uint64_t need = static_cast<uint64_t>(stride) * R * sizeof(int32_t) +
                           VNPU_CACHELINE_BYTES;
     if (!scratch || scratch_bytes < need) return false;
-    int32_t *acc0 = reinterpret_cast<int32_t *>(align_up(
+    int32_t *acc[R];
+    const int8_t *ar[R];
+    int32_t *base = reinterpret_cast<int32_t *>(align_up(
         reinterpret_cast<uintptr_t>(scratch), VNPU_CACHELINE_BYTES));
-    int32_t *acc1 = acc0 + stride;
-    std::memset(acc0, 0, static_cast<size_t>(stride) * 2u * sizeof(int32_t));
-    const int8_t *ar0 = p.A + static_cast<size_t>(tile.m0) * p.lda;
-    const int8_t *ar1 = ar0 + p.lda;
+    for (uint32_t i = 0; i < R; ++i) {
+        acc[i] = base + static_cast<size_t>(i) * stride;
+        ar[i] = p.A + static_cast<size_t>(tile.m0 + i) * p.lda;
+    }
+    std::memset(base, 0, static_cast<size_t>(stride) * R * sizeof(int32_t));
     const uint32_t full = width & ~7u;
     for (uint32_t k = 0; k < p.K; ++k) {
         const int8_t *brow = p.B.original +
             static_cast<size_t>(k) * p.B.N + tile.n0;
-        const __m256i va0 = _mm256_set1_epi32(ar0[k]);
-        const __m256i va1 = _mm256_set1_epi32(ar1[k]);
+        __m256i va[R];
+        for (uint32_t i = 0; i < R; ++i)
+            va[i] = _mm256_set1_epi32(ar[i][k]);
         for (uint32_t j = 0; j < full; j += 8) {
             const __m256i b32 = _mm256_cvtepi8_epi32(
                 _mm_loadl_epi64(reinterpret_cast<const __m128i *>(brow + j)));
-            const __m256i c0 = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i *>(acc0 + j));
-            const __m256i c1 = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i *>(acc1 + j));
-            _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc0 + j),
-                                _mm256_add_epi32(c0,
-                                    _mm256_mullo_epi32(va0, b32)));
-            _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc1 + j),
-                                _mm256_add_epi32(c1,
-                                    _mm256_mullo_epi32(va1, b32)));
+            for (uint32_t i = 0; i < R; ++i) {
+                const __m256i c = _mm256_loadu_si256(
+                    reinterpret_cast<const __m256i *>(acc[i] + j));
+                _mm256_storeu_si256(reinterpret_cast<__m256i *>(acc[i] + j),
+                                    _mm256_add_epi32(
+                                        c, _mm256_mullo_epi32(va[i], b32)));
+            }
         }
         if (full < width) {
-            const int32_t a0 = ar0[k], a1 = ar1[k];
             for (uint32_t j = full; j < width; ++j) {
                 const int32_t b = static_cast<int32_t>(brow[j]);
-                acc0[j] += a0 * b;
-                acc1[j] += a1 * b;
+                for (uint32_t i = 0; i < R; ++i)
+                    acc[i][j] += ar[i][k] * b;
             }
         }
     }
-    for (uint32_t j = 0; j < width; ++j) {
-        store_i8_c(p, tile.m0, tile.n0 + j, acc0[j]);
-        store_i8_c(p, tile.m0 + 1, tile.n0 + j, acc1[j]);
-    }
+    for (uint32_t j = 0; j < width; ++j)
+        for (uint32_t i = 0; i < R; ++i)
+            store_i8_c(p, tile.m0 + i, tile.n0 + j, acc[i][j]);
     return true;
 }
 
@@ -639,11 +642,6 @@ static void gemm_i8_avx2_tile(const GemmI8Params &p, const TileJob &tile)
     constexpr uint32_t NR = 32;   /* 4 vectors of 8 int32 lanes */
     const uint32_t mend = tile.m0 + tile.tm;
     const uint32_t nend = tile.n0 + tile.tn;
-    /* Exactly two rows is the whole tile: stream them together, but only over a
-     * run long enough to pay for the second accumulator row.  At 512 columns or
-     * fewer the staged rows cost more than the strided walk they replace:
-     * 2x4096x1024 measured 0.40 ms streamed against 0.28 ms blocked. */
-    if (tile.tm == 2 && tile.tn >= 1024u && gemm_i8_avx2_rank2(p, tile)) return;
     uint32_t m = tile.m0;
     for (; m + MR <= mend; m += MR) {
         const int8_t *ar0 = p.A + static_cast<size_t>(m) * p.lda;
@@ -940,6 +938,22 @@ static void gemm_i8_dispatch_tile(const GemmI8Params &p,
     }
 #if VNPU_X86
     if (p.isa == ISA_AVX2) {
+        /* Rank-R stream ahead of the packed panel: the panel couples rows in
+         * pairs, so an odd row re-reads the whole panel.  It only pays over a
+         * long run -- at 512 columns or fewer the staged rows cost more than
+         * the walk they replace, which is why 2x4096x1024 measured 0.40 ms
+         * streamed against 0.28 ms blocked. */
+        if (p.B.original && tile.tn >= 1024u) {
+            switch (tile.tm) {
+            case 2: if (gemm_i8_avx2_rank_r<2>(p, tile)) return; break;
+            case 3: if (gemm_i8_avx2_rank_r<3>(p, tile)) return; break;
+            /* M=4 staged four rows and measured 1.98 -> 2.32 ms at
+             * 4x4096x4096: four accumulator rows thrash L1 badly enough that
+             * the panel's register-held accumulators win, so it keeps the
+             * panel and the narrow tile. */
+            default: break;
+            }
+        }
         /* A single-row tile reads each panel entry exactly once, so packing
          * it is a pure copy: that is the decode shape, which stays row-major. */
         if (p.pack_b && tile.tm >= 3 && p.B.original) {

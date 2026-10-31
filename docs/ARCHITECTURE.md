@@ -126,7 +126,11 @@ cull mask is present, otherwise Voodoo.
   `VNPU_PACK=0` selects the unpacked path for A/B measurement.
 - AVX2, M≤8 (decode): one row at a time with K outermost, so B is walked
   linearly and the prefetcher sees one run rather than a cache line per column.
-  Rows left over from the 3-row block use the same path.
+  Rows left over from the 2-row block use the same path.
+- AVX2, M=2 and M=3 int8 over a wide slice: the rows of the tile are staged as
+  `int32` (4 bytes per column each) and B is swept once for all of them, so
+  every B byte feeds R FMAs. R=4 was measured and is worse than the packed
+  panel (four staged rows thrash L1), so M≥4 keeps the panel.
 - NEON: 4 rows × 4 columns.
 - Scalar: correctness oracle and fallback.
 - Transposed A falls back to scalar tiles.

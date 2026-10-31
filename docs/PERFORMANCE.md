@@ -148,15 +148,39 @@ are worth 1.9x on their own at N=262144, where the bare `N / units` rule picks
 a tile that no longer fits next to the stream.
 
 The wide split is gated on the row count, and on the unit run length from M=2
-up. Two rows cannot keep a wide column block in registers and cannot amortise
-the packed panel that M>=3 builds, so the int8 kernel stages two int32 rows and
+up. Two or three rows cannot keep a wide column block in registers, and the
+packed panel couples rows in pairs rather than covering them, so the int8 kernel
+stages one int32 row per row of the tile and
 streams B once for both; that doubles the accumulator traffic, so it only pays
 while a unit still owns a long run. 2x4096x4096 int8 (2048 columns each) went
 1.58 -> 1.07 ms, while 2x4096x1024 (512 columns each) went 0.28 -> 0.53 ms and
-keeps the 64-column tile. From M=3 up the column strip is reused by every row of
-the tile, so it has to stay small enough to sit in L2: applying the same wide
-tiling at M=4 dropped int8 from 36 to 21 GFLOP/s. f32 has no such kernel and
-keeps the narrow tile at M=2 too, where a wide tile cost 4.9 -> 6.0 ms.
+keeps the 64-column tile.
+
+Three rows had the same problem in a different place. The packed panel couples
+rows in pairs, so an odd row re-reads the whole panel: at M=3 that is 128 bytes
+of panel per k step for three outputs, against the same 128 bytes for four at
+M=4, which is the entire 0.65 against 0.51 ms/row gap. A rank-3 stream reads B
+once for all three rows instead, and it wins at every width tried (int8, 2
+threads, median / min of 11-15 alternating rounds):
+
+| shape | before | after | |
+|---|---:|---:|---:|
+| 3x4096x4096 | 1.98 / 1.79 ms | 1.70 / 1.21 ms | 1.16-1.48x |
+| 3x4096x2048 | 0.84 / 0.80 ms | 0.67 / 0.62 ms | 1.26x |
+| 3x2048x2048 | 0.62 / 0.47 ms | 0.44 / 0.33 ms | 1.41x |
+| 3x512x262144 | 27.0 / 25.8 ms | 14.5 / 14.4 ms | 1.86x |
+| 3x64x262144 | 3.06 / 2.63 ms | 2.42 / 2.27 ms | 1.26x |
+
+The wide decode shapes gain most because the old path also copied a `K x 64`
+panel per tile, and there are `N / 64` of them; the rank-3 stream reads the
+original B once.
+
+Four rows are where the stream stops paying. Four staged `int32` rows thrash L1
+badly enough that the panel's register-held accumulators win: `4x4096x4096` int8
+went 1.98 -> 2.32 ms with a rank-4 stream, so the wide gate deliberately stops at
+M=3 and M=4 keeps the packed panel with its 64-column tile. f32 has no staged
+decode stream at all and keeps the narrow tile, where a wide tile at M=2 cost
+4.9 -> 6.0 ms.
 
 ### Two ideas that measured worse, and why they are not here
 

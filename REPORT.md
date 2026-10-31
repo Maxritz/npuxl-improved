@@ -51,12 +51,16 @@ choose among them empirically.
   registers; paired with one contiguous slice of N per unit at M=1 it took
   1×4096×4096 INT8 from 2.47 ms to 1.03 ms (13.6 to 32.5 GFLOP/s) with
   bit-identical results;
-- AVX2 INT8 rank-2 decode row: two rows stage two int32 rows and share a single
-  pass over B, which took 2×4096×4096 INT8 from 1.58 ms to 1.07 ms with
+- AVX2 INT8 rank-R decode stream (R = 2 and 3): R rows stage R int32 rows and
+  share a single pass over B, which took 2×4096×4096 INT8 from 1.58 ms to
+  1.07 ms and 3×4096×4096 from 1.98 to 1.70 ms (1.21 ms best), all with
   bit-identical results. It needs a long run per unit (≥1024 columns) because
-  the second staged row doubles the accumulator traffic, and f32 keeps the old
-  narrow tile. From M=3 up the column strip is reused across rows and has to
-  stay in L2, where the same wide tiling costs 1.7×;
+  each staged row adds accumulator traffic, and f32 keeps the old narrow tile.
+  R=3 exists because the packed panel pairs rows, so at M=3 the odd row re-read
+  the whole panel — the same panel bytes for three outputs as for four, which
+  was the entire 0.65 against 0.51 ms/row gap. R=4 was implemented and measured
+  worse (4×4096×4096 went 1.98 -> 2.32 ms: four staged rows thrash L1, and the
+  panel's register-held accumulators win), so the wide gate stops at M=3;
 - AVX2 column-blocked INT8 GEMM: 2 rows × 32 columns per block, eight int32
   accumulators plus the operand vectors;
 - AArch64 NEON 4×4 F32 GEMM;

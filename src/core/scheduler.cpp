@@ -105,11 +105,13 @@ static void tile_geometry(const vnpu_device_t *device, uint32_t unit,
      * here gave a handful of very wide tiles, i.e. one unit did the token. */
     if (M <= 8 && (unit == VNPU_UNIT_VOODOO || unit == VNPU_UNIT_AUTO)) {
         tm = M;
-        /* From M=2 up the column strip is reused by every row of the tile, so
+        /* From M=4 up the column strip is reused by every row of the tile, so
          * it has to stay small enough to live in L2 and the narrow tile is
-         * kept: the wide split below dropped 4x4096x4096 int8 from 36 to 21
-         * GFLOP/s.  Only a single row has no reuse of B at all. */
-        if (M > 2) {
+         * kept: the wide split dropped 4x4096x4096 int8 from 36 to 21 GFLOP/s,
+         * and re-measuring with the rank-R stream confirmed it -- four staged
+         * rows cost 1.98 -> 2.32 ms there.  Only one to three rows have no
+         * reuse partner. */
+        if (M > 3) {
             tn = std::min<uint32_t>(std::max<uint32_t>(32, tn), 64);
             if (tn > N) tn = N;
             return;
@@ -127,7 +129,7 @@ static void tile_geometry(const vnpu_device_t *device, uint32_t unit,
          * and keeps the narrow tile.  The f32 kernel has no such stream, and a
          * wide tile there cost 4.9 -> 6.0 ms at 2x4096x4096. */
         const uint32_t units = std::max<uint32_t>(1, device->info.num_threads);
-        if (M == 2 && (!int8 || N / units < 1024u)) {
+        if (M <= 3 && (!int8 || N / units < 1024u)) {
             tn = std::min<uint32_t>(std::max<uint32_t>(32, tn), 64);
             if (tn > N) tn = N;
             return;
