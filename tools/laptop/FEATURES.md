@@ -1,5 +1,14 @@
 # Virtual NPU: what is actually in here
 
+> **Status: separate prototype, not part of `libvnpu`.**
+> This file documents `tools/laptop/vnpu_laptop.cpp`, a Windows/Meteor Lake
+> experiment. It is not in `LIB_SRCS` in the `Makefile` and is not built by
+> `make` or `CMakeLists.txt`, so **none of the numbers below describe the
+> shipped library**. The library has no AVX-512 and no VNNI kernel: it runs
+> AVX2+FMA (`src/kernels/kernels.cpp`), where INT8 has no dot-product
+> instruction. Library figures are in `README.md` and `docs/PERFORMANCE.md`,
+> measured against a compiler-vectorised plain-C baseline.
+
 Source of truth: `vnpu_laptop.cpp` (kernels, pools, benchmarks) and `sherlock.h`
 (tracing). Target: Intel Core Ultra 5 135H (Meteor Lake), AVX2 + FMA3 +
 AVX-VNNI (VEX-256), no AVX-512. The baseline it must beat is a plain
@@ -77,6 +86,10 @@ worst-first hot spots, a B/MAC column, and cache-roof ladder verdicts.
 Not transferable here: packed-decimal, POWER DSCR.
 
 ## Measured verdicts
+
+Everything in this section was measured on the prototype above, single-thread
+unless stated, against its own `rawcpu` baseline. It is not the library's
+performance and should not be quoted as such.
 
 - `vnni_pan8` is 3.4-4.5x `rawcpu` single-thread, across M = 1..128.
 - 8 P-core logicals reach ~7.6x at M=128 (268 GMAC/s against 35 GMAC/s for one).
