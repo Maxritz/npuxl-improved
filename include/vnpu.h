@@ -550,6 +550,13 @@ VNPU_API vnpu_status_t VNPU_CALL vnpu_packed_weights_info(
 /* Synchronous convenience API - thin wrappers over the command stream.       */
 /* ------------------------------------------------------------------------- */
 
+/* Direct inference fast path (src/kernels/vnpu_fast.cpp): calling-thread GEMM
+ * with no command struct, no stream hop, no tile vector, no trace string, no
+ * pool dispatch. Row-major A[M,K] x B[K,N] -> C[M,N], alpha=1, beta=0.
+ * Picks the 3x32 blocked microkernel (M>=3) or the streaming decode path. */
+VNPU_API void VNPU_CALL vnpu_gemm_f32_direct(const float *A, const float *B, float *C,
+                                            uint32_t M, uint32_t K, uint32_t N);
+
 VNPU_API vnpu_status_t VNPU_CALL vnpu_matmul_f32(vnpu_stream_t *stream,
                                                  const vnpu_matmul_f32_args_t *args);
 VNPU_API vnpu_status_t VNPU_CALL vnpu_matmul_i8(vnpu_stream_t *stream,

@@ -485,8 +485,25 @@ struct TraceState {
 
 class ScopedTrace {
 public:
+    ScopedTrace() : trace_(nullptr), category_(0), active_(false) {}
     ScopedTrace(TraceState *trace, std::string name, uint32_t opcode,
                 uint32_t unit, uint32_t category = 0);
+    ScopedTrace(ScopedTrace&& o) noexcept
+        : trace_(o.trace_), event_(std::move(o.event_)), start_ns_(o.start_ns_),
+          category_(o.category_), active_(o.active_) { o.active_ = false; }
+    ScopedTrace& operator=(ScopedTrace&& o) noexcept {
+        if (this != &o) {
+            trace_ = o.trace_;
+            event_ = std::move(o.event_);
+            start_ns_ = o.start_ns_;
+            category_ = o.category_;
+            active_ = o.active_;
+            o.active_ = false;
+        }
+        return *this;
+    }
+    ScopedTrace(const ScopedTrace&) = delete;
+    ScopedTrace& operator=(const ScopedTrace&) = delete;
     ~ScopedTrace();
     void add_bytes(uint64_t read_bytes, uint64_t write_bytes);
     void add_flops(uint64_t value);

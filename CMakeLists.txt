@@ -24,6 +24,7 @@ set(VNPU_SOURCES
   src/core/backend.cpp
   src/kernels/kernels.cpp
   src/kernels/llm.cpp
+  src/kernels/vnpu_fast.cpp
   src/cluster/net.cpp
   src/cluster/node.cpp
   src/cluster/cluster.cpp

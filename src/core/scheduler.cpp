@@ -689,21 +689,30 @@ vnpu_status_t schedule_command(vnpu_device_t *device, vnpu_stream_t *stream,
     case VNPU_OP_MTP_HEAD_F32: unit = cmd.args.mtp_head.unit; break;
     default: break;
     }
-    std::string trace_name = std::string(vnpu_opcode_name(cmd.opcode)) +
-                             "#" + std::to_string(cmd.id);
+    // Inference tuning: no heap work on the hot path unless tracing. The old code
+    // built std::string(opcode) + "#" + to_string(id) for EVERY command even with
+    // tracing off - a malloc + format per GEMM on a path that runs 40x/token.
+    const bool tracing = device->trace.enabled.load(std::memory_order_relaxed);
+    ScopedTrace* trace_ptr = nullptr;
+    ScopedTrace trace_storage;
+    std::string trace_name;
     uint32_t category = 0; /* compute */
-    if (cmd.opcode == VNPU_OP_COPY || cmd.opcode == VNPU_OP_MEMSET ||
-        cmd.opcode == VNPU_OP_PACK_WEIGHTS_I8)
-        category = 1; /* memory */
-    else if (cmd.opcode == VNPU_OP_BARRIER || cmd.opcode == VNPU_OP_NOP)
-        category = 2; /* sync */
-    ScopedTrace trace(&device->trace, trace_name, cmd.opcode, unit, category);
+    if (tracing) {
+        if (cmd.opcode == VNPU_OP_COPY || cmd.opcode == VNPU_OP_MEMSET ||
+            cmd.opcode == VNPU_OP_PACK_WEIGHTS_I8)
+            category = 1; /* memory */
+        else if (cmd.opcode == VNPU_OP_BARRIER || cmd.opcode == VNPU_OP_NOP)
+            category = 2; /* sync */
+        trace_name = std::string(vnpu_opcode_name(cmd.opcode)) + "#" + std::to_string(cmd.id);
+        trace_storage = ScopedTrace(&device->trace, std::move(trace_name), cmd.opcode, unit, category);
+        trace_ptr = &trace_storage;
+    }
     ExecCtx ctx;
     ctx.device = device;
     ctx.stream = stream;
     ctx.cmd = &cmd;
     ctx.flags = flags;
-    ctx.trace = &trace;
+    ctx.trace = trace_ptr;
     device->last_opcode.store(cmd.opcode);
     vnpu_status_t rc = VNPU_OK;
     try {
@@ -746,9 +755,11 @@ vnpu_status_t schedule_command(vnpu_device_t *device, vnpu_stream_t *stream,
     device->dma_bytes.fetch_add(ctx.dma_bytes);
     device->tiles_dispatched.fetch_add(ctx.tiles_dispatched);
     device->tiles_culled.fetch_add(ctx.tiles_culled);
-    trace.add_bytes(ctx.bytes_read, ctx.bytes_written);
-    trace.add_flops(ctx.flops);
-    if (rc != VNPU_OK) trace.cancel();
+    if (trace_ptr) {
+        trace_ptr->add_bytes(ctx.bytes_read, ctx.bytes_written);
+        trace_ptr->add_flops(ctx.flops);
+        if (rc != VNPU_OK) trace_ptr->cancel();
+    }
     return rc;
 }
 
